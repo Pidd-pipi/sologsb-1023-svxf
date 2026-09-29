@@ -156,6 +156,59 @@ textarea {
   vertical-align: top;
 }
 
+.unit-block + .unit-block {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e5e6eb;
+}
+
+.pending-card .arco-card-body {
+  padding-top: 8px;
+}
+
+.pending-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 10px 4px;
+}
+
+.pending-item + .pending-item {
+  border-top: 1px solid #f2f3f5;
+}
+
+.pending-texts {
+  flex: 1;
+  min-width: 0;
+}
+
+.pending-line {
+  margin-bottom: 4px;
+  color: #4e5969;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.pending-line .arco-tag {
+  margin-right: 6px;
+}
+
+.pending-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+  color: #4e5969;
+  font-size: 12px;
+}
+
+.pending-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
 .inspector-empty {
   display: grid;
   min-height: 260px;

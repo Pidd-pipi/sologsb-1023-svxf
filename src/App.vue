@@ -1,40 +1,47 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { statusLabel, useCollation } from './composables/useCollation';
-import type { AlignmentRow, DifferenceStatus } from './types';
+import { relationLabel, relationOf, statusLabel, useCollation } from './composables/useCollation';
+import type { AlignmentGroup, DifferenceStatus, PendingRecord, TextUnit } from './types';
 
 const {
   versions,
   leftVersionId,
   rightVersionId,
   rows,
+  pending,
   rules,
-  selectedRowId,
+  selectedGroupId,
   selectedRowIds,
   processing,
   progress,
   message,
   canUndo,
   canRedo,
-  selectedRow,
+  leftUnitMap,
+  rightUnitMap,
+  allUnitMap,
+  selectedGroup,
   differenceCount,
   acceptedCount,
   unresolvedCount,
+  pendingCount,
   runAlignment,
   recalculate,
-  updateRow,
-  shiftPairing,
+  updateGroup,
+  mergeGroups,
+  splitGroup,
   moveRow,
   acceptRows,
   acceptAll,
   nextDifference,
+  assignPending,
+  dismissPending,
   addVersion,
   undo,
   redo,
   exportMarkdown,
-  exportJson,
-  commit
+  exportJson
 } = useCollation();
 
 const importVisible = ref(false);
@@ -44,21 +51,29 @@ const noteDraft = ref('');
 const sourceDraft = ref('');
 const importForm = ref({ name: '', source: '', text: '' });
 const fileInput = ref<HTMLInputElement | null>(null);
+const assignTargets = ref<Record<string, string>>({});
 
 const columns = [
-  { title: '状态', dataIndex: 'status', slotName: 'status', width: 122, fixed: 'left' as const },
-  { title: '底本', dataIndex: 'left', slotName: 'left', width: 330 },
-  { title: '对准操作', dataIndex: 'align', slotName: 'align', width: 112, align: 'center' as const },
-  { title: '参校本', dataIndex: 'right', slotName: 'right', width: 330 },
+  { title: '状态', dataIndex: 'status', slotName: 'status', width: 132, fixed: 'left' as const },
+  { title: '底本', dataIndex: 'left', slotName: 'left', width: 320 },
+  { title: '分组操作', dataIndex: 'align', slotName: 'align', width: 104, align: 'center' as const },
+  { title: '参校本', dataIndex: 'right', slotName: 'right', width: 320 },
   { title: '校记 / 来源', dataIndex: 'note', slotName: 'note', width: 240 }
 ];
+
+function unitsOf(group: AlignmentGroup, side: 'left' | 'right'): TextUnit[] {
+  const map = side === 'left' ? leftUnitMap.value : rightUnitMap.value;
+  const ids = side === 'left' ? group.leftIds : group.rightIds;
+  return ids.map((id) => map.get(id)).filter((unit): unit is TextUnit => Boolean(unit));
+}
 
 const filteredRows = computed(() => {
   const query = rowQuery.value.trim().toLocaleLowerCase();
   return rows.value.filter((row) => {
     if (onlyDifferences.value && row.status === 'same') return false;
     if (!query) return true;
-    return [row.left?.text, row.right?.text, row.note, row.source, statusLabel(row.status)]
+    const texts = [...unitsOf(row, 'left'), ...unitsOf(row, 'right')].map((unit) => unit.text);
+    return [...texts, row.note, row.source, statusLabel(row.status), relationLabel(relationOf(row))]
       .filter(Boolean)
       .some((value) => value!.toLocaleLowerCase().includes(query));
   });
@@ -71,11 +86,22 @@ const rowSelection = computed(() => ({
   onlyCurrent: false
 }));
 
+const groupOptions = computed(() =>
+  rows.value.map((group, index) => {
+    const preview =
+      unitsOf(group, 'left')[0]?.text ?? unitsOf(group, 'right')[0]?.text ?? '（空组）';
+    return {
+      value: group.id,
+      label: `#${index + 1} ${relationLabel(relationOf(group))}｜${preview.slice(0, 14)}`
+    };
+  })
+);
+
 watch(
-  selectedRow,
-  (row) => {
-    noteDraft.value = row?.note ?? '';
-    sourceDraft.value = row?.source ?? '';
+  selectedGroup,
+  (group) => {
+    noteDraft.value = group?.note ?? '';
+    sourceDraft.value = group?.source ?? '';
   },
   { immediate: true }
 );
@@ -90,8 +116,8 @@ function statusColor(status: DifferenceStatus) {
   }[status] as 'gray' | 'orange' | 'green' | 'red' | 'arcoblue';
 }
 
-function rowClass(record: AlignmentRow) {
-  return record.id === selectedRowId.value ? 'row-active' : '';
+function rowClass(record: AlignmentGroup) {
+  return record.id === selectedGroupId.value ? 'row-active' : '';
 }
 
 function onSelectionChange(keys: (string | number)[]) {
@@ -99,22 +125,55 @@ function onSelectionChange(keys: (string | number)[]) {
 }
 
 function updateStatus(status: unknown) {
-  if (!selectedRow.value) return;
-  updateRow(selectedRow.value.id, { status: String(status) as DifferenceStatus });
+  if (!selectedGroup.value) return;
+  updateGroup(selectedGroup.value.id, { status: String(status) as DifferenceStatus });
 }
 
 function onRowClick(record: Record<string, unknown>) {
-  const row = record as unknown as AlignmentRow;
-  selectedRowId.value = row.id;
+  const group = record as unknown as AlignmentGroup;
+  selectedGroupId.value = group.id;
 }
 
 function saveAnnotation() {
-  if (!selectedRow.value) return;
-  updateRow(selectedRow.value.id, {
+  if (!selectedGroup.value) return;
+  updateGroup(selectedGroup.value.id, {
     note: noteDraft.value.trim(),
     source: sourceDraft.value.trim()
   });
   Message.success('校勘说明已保存');
+}
+
+function mergeSelected() {
+  if (mergeGroups(selectedRowIds.value.map(String))) {
+    Message.success('已合并选中分组');
+  } else {
+    Message.warning('只能合并相邻的分组');
+  }
+}
+
+function mergeWithNext(id: string) {
+  const index = rows.value.findIndex((group) => group.id === id);
+  if (index < 0 || index + 1 >= rows.value.length) {
+    Message.info('已经是最后一组，没有可合并的下一组');
+    return;
+  }
+  mergeGroups([id, rows.value[index + 1].id]);
+}
+
+function pendingPreview(record: PendingRecord, side: 'left' | 'right') {
+  const ids = side === 'left' ? record.leftIds : record.rightIds;
+  const texts = ids.map((id) => allUnitMap.value.get(id)?.text).filter(Boolean);
+  return texts.length ? texts.join(' / ') : '（原句段已不存在）';
+}
+
+function confirmAssign(record: PendingRecord) {
+  const target = assignTargets.value[record.id];
+  if (!target) {
+    Message.warning('请先选择归属分组');
+    return;
+  }
+  assignPending(record.id, target);
+  delete assignTargets.value[record.id];
 }
 
 function download(filename: string, text: string, type: string) {
@@ -185,7 +244,7 @@ function handleKeydown(event: KeyboardEvent) {
 window.addEventListener('keydown', handleKeydown);
 
 const beforeUnload = (event: BeforeUnloadEvent) => {
-  if (unresolvedCount.value > 0) {
+  if (unresolvedCount.value > 0 || pendingCount.value > 0) {
     event.preventDefault();
     event.returnValue = '';
   }
@@ -200,7 +259,7 @@ window.addEventListener('beforeunload', beforeUnload);
         <div class="brand-mark">校</div>
         <div>
           <h1 class="brand-title">校异斋 · 多版本校勘台</h1>
-          <div class="brand-subtitle">自动对齐、人工修正、校记导出，全程本地保存</div>
+          <div class="brand-subtitle">多对多分组对齐、人工修正、校记导出，全程本地保存</div>
         </div>
         <a-space style="margin-left: auto" wrap>
           <a-button :disabled="!canUndo" @click="undo">撤销</a-button>
@@ -246,7 +305,7 @@ window.addEventListener('beforeunload', beforeUnload);
             <a-checkbox v-model="rules.ignoreVariants" @change="recalculate">忽略常见异体字</a-checkbox>
           </a-space>
           <div style="margin-top: 10px; color: #86909c; font-size: 12px; line-height: 1.6">
-            规则只影响相同/改动判断，原始正文始终保留；重算会进入撤销历史。
+            规则只影响相同/改动判断，原始正文始终保留；人工分组在重算时优先保留，引用失效句段的组会整体进入待归属区。
           </div>
         </section>
 
@@ -266,8 +325,8 @@ window.addEventListener('beforeunload', beforeUnload);
               <div class="stat-label">已接受</div>
             </div>
             <div class="stat-card">
-              <div class="stat-number">{{ rows.length }}</div>
-              <div class="stat-label">对齐句段</div>
+              <div class="stat-number" style="color: #722ed1">{{ pendingCount }}</div>
+              <div class="stat-label">待归属</div>
             </div>
           </div>
           <a-button long type="primary" status="success" style="margin-top: 12px" :disabled="!unresolvedCount" @click="acceptAll">
@@ -292,8 +351,9 @@ window.addEventListener('beforeunload', beforeUnload);
           <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
             <a-input-search v-model="rowQuery" placeholder="搜索正文、校记或来源" allow-clear style="max-width: 360px" />
             <a-checkbox v-model="onlyDifferences">只看差异</a-checkbox>
-            <a-tag color="arcoblue">{{ filteredRows.length }} / {{ rows.length }} 行</a-tag>
-            <a-tag v-if="selectedRowIds.length" color="green">{{ selectedRowIds.length }} 行已勾选</a-tag>
+            <a-tag color="arcoblue">{{ filteredRows.length }} / {{ rows.length }} 组</a-tag>
+            <a-tag v-if="selectedRowIds.length" color="green">{{ selectedRowIds.length }} 组已勾选</a-tag>
+            <a-button v-if="selectedRowIds.length >= 2" size="small" @click="mergeSelected">合并选中行</a-button>
             <a-button
               v-if="selectedRowIds.length"
               type="primary"
@@ -307,9 +367,42 @@ window.addEventListener('beforeunload', beforeUnload);
           </div>
         </a-card>
 
+        <a-card v-if="pending.length" :bordered="false" class="pending-card" style="margin-bottom: 12px">
+          <template #title>
+            <span style="color: #722ed1">待归属区（{{ pending.length }}）</span>
+          </template>
+          <template #extra>
+            <span style="color: #86909c; font-size: 12px">旧校记找不到唯一归属，请人工指定</span>
+          </template>
+          <div v-for="record in pending" :key="record.id" class="pending-item">
+            <div class="pending-texts">
+              <div class="pending-line"><a-tag size="small">底本</a-tag>{{ pendingPreview(record, 'left') }}</div>
+              <div class="pending-line"><a-tag size="small" color="arcoblue">参校</a-tag>{{ pendingPreview(record, 'right') }}</div>
+              <div class="pending-meta">
+                <span v-if="record.note">校记：{{ record.note }}</span>
+                <span v-if="record.source">来源：{{ record.source }}</span>
+                <a-tag v-if="record.accepted" size="small" color="green">原已接受</a-tag>
+                <span style="color: #86909c">{{ record.reason }}</span>
+              </div>
+            </div>
+            <div class="pending-actions">
+              <a-select
+                v-model="assignTargets[record.id]"
+                placeholder="选择归属分组"
+                style="width: 240px"
+                :options="groupOptions"
+                allow-search
+              />
+              <a-button size="small" type="primary" @click="confirmAssign(record)">指定归属</a-button>
+              <a-button size="small" status="danger" @click="dismissPending(record.id)">删除</a-button>
+            </div>
+          </div>
+        </a-card>
+
         <a-card :bordered="false" :body-style="{ padding: 0 }">
-          <a-alert :show-icon="processing" :type="unresolvedCount ? 'warning' : 'success'" style="border-radius: 0">
-            {{ message }}<span v-if="unresolvedCount"> · {{ unresolvedCount }} 条差异尚未接受</span>
+          <a-alert :show-icon="processing" :type="unresolvedCount || pendingCount ? 'warning' : 'success'" style="border-radius: 0">
+            {{ message }}<span v-if="unresolvedCount"> · {{ unresolvedCount }} 组差异尚未接受</span>
+            <span v-if="pendingCount"> · {{ pendingCount }} 条记录待归属</span>
           </a-alert>
           <a-table
             class="virtual-table"
@@ -328,41 +421,68 @@ window.addEventListener('beforeunload', beforeUnload);
               <a-tag :color="statusColor(record.status)">
                 {{ statusLabel(record.status) }}
               </a-tag>
+              <div style="margin-top: 6px">
+                <a-tag size="small" color="purple">{{ relationLabel(relationOf(record)) }}</a-tag>
+              </div>
               <div style="margin-top: 6px; color: #86909c; font-size: 11px">
                 相似度 {{ Math.round(record.similarity * 100) }}%
               </div>
-              <div v-if="record.manuallyAdjusted" style="margin-top: 4px; color: #165dff; font-size: 11px">人工调整</div>
+              <div v-if="record.manual" style="margin-top: 4px; color: #165dff; font-size: 11px">人工分组</div>
             </template>
 
             <template #left="{ record }">
-              <div v-if="record.left">
-                <div class="paragraph-label">段 {{ record.left.paragraphOrder }} · 句 {{ record.left.sentenceOrder }}</div>
-                <div class="diff-text" :class="record.status === 'removed' ? 'removed' : record.status === 'changed' || record.status === 'misaligned' ? 'changed' : 'same'">
-                  {{ record.left.text }}
+              <template v-if="record.leftIds.length">
+                <div v-for="(unit, k) in unitsOf(record, 'left')" :key="unit.id" class="unit-block">
+                  <div class="paragraph-label">
+                    段 {{ unit.paragraphOrder }} · 句 {{ unit.sentenceOrder }}
+                    <span v-if="record.leftIds.length > 1">（{{ k + 1 }}/{{ record.leftIds.length }}）</span>
+                  </div>
+                  <div
+                    class="diff-text"
+                    :class="record.status === 'removed' ? 'removed' : record.status === 'changed' || record.status === 'misaligned' ? 'changed' : 'same'"
+                  >
+                    {{ unit.text }}
+                  </div>
                 </div>
-              </div>
+              </template>
               <div v-else style="padding: 20px 8px; color: #86909c; text-align: center">无对应底本句</div>
             </template>
 
             <template #align="{ record }">
               <a-space direction="vertical" size="mini">
-                <a-button size="mini" @click.stop="shiftPairing(record.id, -1)">配对上移</a-button>
-                <a-button size="mini" @click.stop="shiftPairing(record.id, 1)">配对下移</a-button>
-                <a-button size="mini" @click.stop="moveRow(record.id, -1)">整行上移</a-button>
-                <a-button size="mini" @click.stop="moveRow(record.id, 1)">整行下移</a-button>
-                <a-tooltip content="接受这一行的自动判断">
+                <a-tooltip content="与下一组合并为一个多对多分组">
+                  <a-button size="mini" @click.stop="mergeWithNext(record.id)">并入下行</a-button>
+                </a-tooltip>
+                <a-button
+                  size="mini"
+                  :disabled="record.leftIds.length <= 1 && record.rightIds.length <= 1"
+                  @click.stop="splitGroup(record.id)"
+                >
+                  拆回单句
+                </a-button>
+                <a-button size="mini" @click.stop="moveRow(record.id, -1)">上移</a-button>
+                <a-button size="mini" @click.stop="moveRow(record.id, 1)">下移</a-button>
+                <a-tooltip content="接受这一组的自动判断">
                   <a-button size="mini" status="success" @click.stop="acceptRows([record.id])">接受</a-button>
                 </a-tooltip>
               </a-space>
             </template>
 
             <template #right="{ record }">
-              <div v-if="record.right">
-                <div class="paragraph-label">段 {{ record.right.paragraphOrder }} · 句 {{ record.right.sentenceOrder }}</div>
-                <div class="diff-text" :class="record.status === 'added' ? 'added' : record.status === 'changed' || record.status === 'misaligned' ? 'changed' : 'same'">
-                  {{ record.right.text }}
+              <template v-if="record.rightIds.length">
+                <div v-for="(unit, k) in unitsOf(record, 'right')" :key="unit.id" class="unit-block">
+                  <div class="paragraph-label">
+                    段 {{ unit.paragraphOrder }} · 句 {{ unit.sentenceOrder }}
+                    <span v-if="record.rightIds.length > 1">（{{ k + 1 }}/{{ record.rightIds.length }}）</span>
+                  </div>
+                  <div
+                    class="diff-text"
+                    :class="record.status === 'added' ? 'added' : record.status === 'changed' || record.status === 'misaligned' ? 'changed' : 'same'"
+                  >
+                    {{ unit.text }}
+                  </div>
                 </div>
-              </div>
+              </template>
               <div v-else style="padding: 20px 8px; color: #86909c; text-align: center">无对应参校本句</div>
             </template>
 
@@ -376,7 +496,7 @@ window.addEventListener('beforeunload', beforeUnload);
             </template>
 
             <template #empty>
-              <a-empty description="没有符合条件的对齐行" />
+              <a-empty description="没有符合条件的对齐分组" />
             </template>
           </a-table>
         </a-card>
@@ -386,14 +506,24 @@ window.addEventListener('beforeunload', beforeUnload);
         <section class="panel-section">
           <div style="display: flex; align-items: center">
             <h2 class="panel-title" style="margin: 0">校勘详情</h2>
-            <a-tag v-if="selectedRow" color="arcoblue" style="margin-left: auto">{{ statusLabel(selectedRow.status) }}</a-tag>
+            <a-tag v-if="selectedGroup" color="arcoblue" style="margin-left: auto">
+              {{ statusLabel(selectedGroup.status) }}
+            </a-tag>
           </div>
         </section>
 
-        <template v-if="selectedRow">
+        <template v-if="selectedGroup">
+          <section class="panel-section">
+            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">对齐关系</div>
+            <a-tag color="purple">{{ relationLabel(relationOf(selectedGroup)) }}</a-tag>
+            <span style="margin-left: 8px; color: #86909c; font-size: 12px">
+              底本 {{ selectedGroup.leftIds.length }} 句 · 参校本 {{ selectedGroup.rightIds.length }} 句
+            </span>
+          </section>
+
           <section class="panel-section">
             <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">判断类别</div>
-            <a-select :model-value="selectedRow.status" style="width: 100%" @change="updateStatus">
+            <a-select :model-value="selectedGroup.status" style="width: 100%" @change="updateStatus">
               <a-option value="same">相同</a-option>
               <a-option value="changed">改动</a-option>
               <a-option value="added">右侧新增</a-option>
@@ -404,9 +534,15 @@ window.addEventListener('beforeunload', beforeUnload);
 
           <section class="panel-section">
             <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">底本 / 参校本</div>
-            <div class="diff-text same">{{ selectedRow.left?.text || '（无）' }}</div>
+            <div v-for="unit in unitsOf(selectedGroup, 'left')" :key="`l-${unit.id}`" class="diff-text same" style="margin-bottom: 6px">
+              {{ unit.text }}
+            </div>
+            <div v-if="!selectedGroup.leftIds.length" class="diff-text same">（无）</div>
             <div style="height: 8px" />
-            <div class="diff-text changed">{{ selectedRow.right?.text || '（无）' }}</div>
+            <div v-for="unit in unitsOf(selectedGroup, 'right')" :key="`r-${unit.id}`" class="diff-text changed" style="margin-bottom: 6px">
+              {{ unit.text }}
+            </div>
+            <div v-if="!selectedGroup.rightIds.length" class="diff-text changed">（无）</div>
           </section>
 
           <section class="panel-section">
@@ -421,26 +557,31 @@ window.addEventListener('beforeunload', beforeUnload);
           </section>
 
           <section class="panel-section">
-            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">错位修正</div>
+            <div style="margin-bottom: 10px; color: #86909c; font-size: 12px">分组调整</div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px">
-              <a-button @click="shiftPairing(selectedRow.id, -1)">配对向前</a-button>
-              <a-button @click="shiftPairing(selectedRow.id, 1)">配对向后</a-button>
-              <a-button @click="moveRow(selectedRow.id, -1)">整行上移</a-button>
-              <a-button @click="moveRow(selectedRow.id, 1)">整行下移</a-button>
+              <a-button @click="mergeWithNext(selectedGroup.id)">并入下一行</a-button>
+              <a-button
+                :disabled="selectedGroup.leftIds.length <= 1 && selectedGroup.rightIds.length <= 1"
+                @click="splitGroup(selectedGroup.id)"
+              >
+                拆回单句
+              </a-button>
+              <a-button @click="moveRow(selectedGroup.id, -1)">整组上移</a-button>
+              <a-button @click="moveRow(selectedGroup.id, 1)">整组下移</a-button>
             </div>
             <a-alert type="info" style="margin-top: 10px" :show-icon="true">
-              配对移动只交换左栏句段，不会改写底本或参校本原文。
+              合并只把相邻分组并为一组，不会改写底本或参校本原文；拆回单句后原校记进入待归属区。
             </a-alert>
           </section>
 
           <section class="panel-section">
             <a-button
               long
-              :status="selectedRow.accepted ? 'normal' : 'success'"
-              :type="selectedRow.accepted ? 'outline' : 'primary'"
-              @click="updateRow(selectedRow.id, { accepted: !selectedRow.accepted })"
+              :status="selectedGroup.accepted ? 'normal' : 'success'"
+              :type="selectedGroup.accepted ? 'outline' : 'primary'"
+              @click="updateGroup(selectedGroup.id, { accepted: !selectedGroup.accepted })"
             >
-              {{ selectedRow.accepted ? '撤回接受状态' : '接受这条校勘建议' }}
+              {{ selectedGroup.accepted ? '撤回接受状态' : '接受这条校勘建议' }}
             </a-button>
           </section>
         </template>
@@ -448,7 +589,7 @@ window.addEventListener('beforeunload', beforeUnload);
         <div v-else class="inspector-empty">
           <div>
             <div style="font-size: 30px; color: #c9cdd4">择</div>
-            <p>选择中间表格的一行<br />即可调整错位并填写校勘说明</p>
+            <p>选择中间表格的一组<br />即可合并拆分并填写校勘说明</p>
           </div>
         </div>
 

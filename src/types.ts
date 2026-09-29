@@ -1,5 +1,7 @@
 export type DifferenceStatus = 'same' | 'changed' | 'added' | 'removed' | 'misaligned';
 
+export type RelationKind = 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many' | 'left-only' | 'right-only';
+
 export interface TextUnit {
   id: string;
   paragraphId: string;
@@ -18,16 +20,26 @@ export interface VersionDocument {
   units: TextUnit[];
 }
 
-export interface AlignmentRow {
+export interface AlignmentGroup {
   id: string;
-  left?: TextUnit;
-  right?: TextUnit;
+  leftIds: string[];
+  rightIds: string[];
   status: DifferenceStatus;
   similarity: number;
   note: string;
   source: string;
   accepted: boolean;
-  manuallyAdjusted: boolean;
+  manual: boolean;
+}
+
+export interface PendingRecord {
+  id: string;
+  leftIds: string[];
+  rightIds: string[];
+  note: string;
+  source: string;
+  accepted: boolean;
+  reason: string;
 }
 
 export interface ComparisonRules {
@@ -40,7 +52,8 @@ export interface PersistedCollationState {
   versions: VersionDocument[];
   leftVersionId: string;
   rightVersionId: string;
-  rows: AlignmentRow[];
+  groups: AlignmentGroup[];
+  pending: PendingRecord[];
   rules: ComparisonRules;
-  selectedRowId: string;
+  selectedGroupId: string;
 }
