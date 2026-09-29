@@ -148,6 +148,55 @@ textarea {
   font-size: 11px;
 }
 
+.unit-block {
+  margin-bottom: 8px;
+}
+
+.unit-block:last-child {
+  margin-bottom: 0;
+}
+
+.empty-cell {
+  padding: 20px 8px;
+  color: #86909c;
+  text-align: center;
+}
+
+.pending-card {
+  margin-bottom: 12px;
+  border-left: 3px solid #ff9a2e;
+}
+
+.pending-item {
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 1px solid #ffe4c4;
+  border-radius: 8px;
+  background: #fffaf3;
+}
+
+.pending-item:last-child {
+  margin-bottom: 0;
+}
+
+.pending-units {
+  margin-top: 8px;
+  color: #4e5969;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.pending-side {
+  color: #86909c;
+}
+
+.pending-note {
+  margin-top: 6px;
+  color: #4e5969;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 .row-active {
   background: #e8f3ff !important;
 }
